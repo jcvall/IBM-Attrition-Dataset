@@ -1,0 +1,169 @@
+---
+title: "Employee Attrition Dataset:  Chris Vallier"
+output:
+  flexdashboard::flex_dashboard:
+    logo: ibm_logo_small.jpg
+    'orientation:': columns
+    'vertical_layout:': fill
+resource_files:
+- EmployeeAttrition.csv
+- ibm_logo_small.jpg
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(correlationfunnel)
+library(janitor)
+library(survival)
+library(GGally)
+library(here)
+library(scales)
+library(kableExtra)
+library(DT)
+library(bbplot)
+library(scales)
+
+
+## Data 
+data <- read_csv('EmployeeAttrition.csv') %>% clean_names()
+
+sur_data <- data |>
+  mutate(attrition_dummy = if_else(attrition == "Yes", 1,0)) |>
+  mutate(gender_dummy = if_else(gender == "Male", 1,0))
+
+```
+
+Row {data-width=650}
+-------------------------------------------------------------------
+
+### Problem Summary
+
+#### Employee attrition is an important business problem.  Losing key employees causes loss of productivity and the company money.  Understanding this problem is key before taking action and preventing it proactively when and where possible.  **This analysis is attempting to address one or two key drivers of turnover and develop an informed recommendation**.  
+
+#### The dataset was provided to the public in 2017 by IBM to aspiring and current data scientists.  The data scientist is to perform a predictive classification task on employee attrition.  This dataset is set up with 35 variables and 1,399 employee records in a CSV file.  Many of the variables include what you would find or could derive in an HR Reporting system.  
+
+#### The analysis performed here is not to predict future employee turnover, but to derive insights and recommendations from the data. So, executives can make informed decisions and create action plans. 
+
+#### Another important note is that the dataset doesn't include hire date nor termination date.  In place of these missing variables tenure in years is used in its place. One cannot tell the time period in which the attrition has taken place, but for this analysis one year is assumed for simplicity. 
+
+
+Column {.tabset}
+-------------------------------------------------------------------
+
+### Current Analysis
+
+#### **1.** At IBM attrition is 16.6% (232 terms / 1399 employees) throughout the year.  This is a higher than average turnover when compared to the software industry, which typically is around 13.3%.
+
+
+```{r}
+library(waterfall)
+
+df <- sur_data |>
+  group_by(department, job_role) |>
+   summarise(`Turnover %` = percent(sum(attrition_dummy) / n()),
+            `Turnover Count` = sum(attrition_dummy),
+            `Avg. Tenure` = round(mean(years_at_company),0),
+            `Avg. Attrition Tenure` = round(mean(years_at_company[attrition_dummy==1]),0)) %>% ungroup() %>%
+  rename(turnover_count = `Turnover Count` ) %>%
+  mutate(job_role = case_when(job_role == "Manager" & department == "Human Resources" ~ "HR Manager",
+                              job_role == "Manager" & department == "Research & Development" ~ "R&D Manager",
+                              job_role == "Manager" & department == "Sales" ~ "Sales Manager", TRUE ~ job_role)) %>% arrange(desc(turnover_count)) |> rename('Turnover Count' = turnover_count)
+
+waterfallchart(job_role ~ `Turnover Count`,
+               horizontal = T, main = 'Turnover by Job Role for one year',
+               data=df) 
+```
+
+#### **2.** The top four job roles make up ~84% of the turnover: Laboratory Technician, Sales Executive, Research Scientist and Sales Representative.
+
+```{r}
+df |>
+  rename('Department' = department, 'Job Role' = job_role) |>
+  kbl(align = 'l', booktabs = T,caption = "Turnover Analysis by Department and Job Role") |> kable_classic(full_width = T) 
+
+```
+
+
+### Root Cause & Insight Analysis
+
+##### **1. The correlation analysis shows overtime has the most influence of attrition**, followed by **junior job level (1)** and **monthly income of less than $2,910** and for employees who have **no stock options**.  Of these factors, overtime is the most controllable factor by management and will be considered for further analysis and recommendations.
+
+```{r}
+
+data |> 
+  binarize(n_bins = 4, thresh_infreq = 0.05) |>
+  correlate(target = attrition__Yes) |>
+  filter(correlation >= 0.2 | correlation <= -0.2) |>
+  plot_correlation_funnel(interactive = FALSE)
+
+```
+
+#### **2.** Survival Analysis shows a higher probability of leaving much sooner when an employee works overtime vs no overtime.
+
+```{r}
+sur_model <- survfit(Surv(years_at_company, attrition_dummy) ~ over_time, data = sur_data)
+ggsurv(sur_model) + theme_minimal() + labs(y = 'Surival Probablity', x = 'Time (Yrs)')
+```
+
+#### **3.** The job roles that are impacted the most by overtime are Sales Representative, Human Resources, and Laboratory Technician. These roles related to overtime accounted for 45% of the turnover count. 
+
+```{r}
+
+sur_data |>
+  mutate(over_time_dummy = if_else(over_time == "Yes",1,0 )) |>
+  group_by(department, job_role) |> 
+  summarise(`Overtime %` = percent(sum(over_time_dummy) / n()),
+            `Overtime Count` = sum(over_time_dummy),
+            `Turnover Count` = round(sum(attrition_dummy),0),
+            `Turnover/Overtime Ratio` = round(`Turnover Count`/ `Overtime Count`, 1), 
+            `Avg. Attrition Tenure` = round(mean(years_at_company[attrition_dummy==1]),0)) |>
+  arrange(desc(`Turnover/Overtime Ratio`)) |>
+  rename('Department' = department, 'Job Role' = job_role) |>
+  mutate(`Job Role` = case_when(`Job Role` == "Manager" & Department == "Human Resources" ~ "HR Manager",
+                              `Job Role`  == "Manager" & Department == "Research & Development" ~ "R&D Manager",
+                              `Job Role`  == "Manager" & Department == "Sales" ~ "Sales Manager", TRUE ~ `Job Role`)) |> 
+  kbl(align = 'l', booktabs = T,caption = "Employee Overtime Analysis") |> kable_classic(full_width = T)
+```
+
+
+### Recommendations 
+
+#### **1.** Correlation analysis showed overtime is the biggest driver. When looking at the 232 terminations 5 job roles had more overtime workers related to turnover than those who did not work overtime : Sales Representative, Sales Executive, Research Scientist, R&D Manager and Laboratory Technician.
+```{r}
+sur_data %>%
+  filter(attrition == "Yes") |>
+  mutate(job_role = case_when(job_role == "Manager" & department == "Human Resources" ~ "HR Manager",
+                              job_role == "Manager" & department == "Research & Development" ~ "R&D Manager",
+                              job_role == "Manager" & department == "Sales" ~ "Sales Manager", TRUE ~ job_role)) |>
+  ggplot(aes(y = job_role, group = over_time, fill = over_time)) + geom_bar(stat = 'Count', position = 'dodge') + labs(x = 'Terminations' , y = 'Job Roles')
+
+```
+
+#### 
+```{r}
+  sur_data %>%
+  group_by(job_role, attrition) %>% 
+  summarise(avg_income = mean(monthly_income)) %>% 
+  ggplot(aes(y = avg_income, x = job_role, fill = attrition)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  labs(title = "Monthly income impact on attrition", subtitle = "Lower Income Plays A Role...for some jobs") +
+  coord_flip() + 
+  bbc_style()
+```
+
+
+#### **3.** The odds of turnover given overtime are 4.4 higher than if you did not work overtime.  For certain roles, odds increase of turnover are over a five fold risk of attrition for the 3 job roles: Sales Representative, Laboratory Technician and Human Resources.  **I would recommend to management restricting overtime when and where necessary for all roles**. I would also recommend more in depth analysis using exit survey responses for Sales Representative, Human Resources, and Laboratory Technician to better understand the drivers of the high turnover.  I would also meet with senior leadership and possibly recommend stay interviews for any employee that is a high concern of leaving.  
+
+```{r}
+model_data <- sur_data  |>
+  mutate(job_role = case_when(job_role == "Manager" & department == "Human Resources" ~ "HR Manager",
+                              job_role == "Manager" & department == "Research & Development" ~ "R&D Manager",
+                              job_role == "Manager" & department == "Sales" ~ "Sales Manager", TRUE ~ job_role))
+
+lm_model <- glm(attrition_dummy ~ over_time + job_role, data = model_data, family = 'binomial')
+
+oddsratio::or_glm(sur_data,lm_model) %>% kbl() |> kable_classic()
+```
+
+
